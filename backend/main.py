@@ -1,7 +1,6 @@
 """
-API principal do sistema LeitorDeDocs.
-Suporta múltiplos provedores de IA: Gemini, Groq (Llama) e Ollama (Llama local).
-Configure o provedor desejado com AI_PROVIDER no arquivo .env.
+API do sistema LeitorDeDocs.
+Utiliza Ollama com modelos Llama locais para extração de documentos.
 """
 import logging
 import os
@@ -13,7 +12,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from ai_provider import AIProvider, OllamaIndisponivel, criar_provedor
+from ai_provider import OllamaIndisponivel, OllamaProvider, conectar
 from document_processor import TIPOS_DOCUMENTOS, processar_documento
 from models import RespostaProcessamento, ResultadoArquivo
 
@@ -22,63 +21,27 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE = 20 * 1024 * 1024
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 EXTENSOES_PERMITIDAS = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
 
-provider: Optional[AIProvider] = None
+provider: Optional[OllamaProvider] = None
 ia_disponivel: bool = False
-
-
-def _ler_config() -> dict:
-    """Lê as configurações de provedor do ambiente."""
-    return {
-        "provider":        os.getenv("AI_PROVIDER", "ollama").strip(),
-        "gemini_api_key":  os.getenv("GEMINI_API_KEY", "").strip(),
-        "groq_api_key":    os.getenv("GROQ_API_KEY", "").strip(),
-        "groq_model":      os.getenv("GROQ_MODEL", "").strip(),
-        "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip(),
-        "ollama_model":    os.getenv("OLLAMA_MODEL", "").strip(),
-    }
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global provider, ia_disponivel
 
-    config = _ler_config()
-    nome_provedor = config["provider"]
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip()
+    modelo   = os.getenv("OLLAMA_MODEL", "llama3.2-vision").strip()
 
-    # Verifica se as credenciais mínimas estão presentes (Ollama não precisa de chave)
-    chave_ausente = (
-        (nome_provedor == "gemini" and not config["gemini_api_key"]) or
-        (nome_provedor == "groq"   and not config["groq_api_key"])
-    )
-
-    if chave_ausente:
-        chave_necessaria = "GEMINI_API_KEY" if nome_provedor == "gemini" else "GROQ_API_KEY"
-        logger.warning(
-            f"⚠️  {chave_necessaria} não configurada para o provedor '{nome_provedor}'. "
-            f"O servidor iniciou, mas o processamento estará desativado. "
-            f"Configure a chave no arquivo .env."
-        )
+    try:
+        provider = conectar(base_url, modelo)
+        ia_disponivel = True
+        logger.info(f"✅ {provider.nome} pronto")
+    except OllamaIndisponivel as e:
+        logger.error(f"❌ Ollama indisponível:\n{e}")
         ia_disponivel = False
-    else:
-        try:
-            provider = criar_provedor(config)
-            ia_disponivel = True
-            logger.info(f"✅ Provedor de IA configurado: {provider.nome}")
-        except OllamaIndisponivel as e:
-            logger.error(f"❌ {e}")
-            logger.error(
-                "   Verifique se o Ollama está instalado e em execução.\n"
-                "   → Instale em: https://ollama.com\n"
-                "   → Inicie com: ollama serve\n"
-                f"  → Baixe o modelo: ollama pull {config.get('ollama_model') or 'llama3.2-vision'}"
-            )
-            ia_disponivel = False
-        except Exception as e:
-            logger.error(f"❌ Erro ao configurar provedor de IA '{nome_provedor}': {e}")
-            ia_disponivel = False
 
     yield
     logger.info("Servidor encerrado")
@@ -86,8 +49,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="LeitorDeDocs API",
-    description="Extração inteligente de documentos — suporta Gemini, Groq/Llama e Ollama/Llama",
-    version="2.0.0",
+    description="Extração inteligente de documentos com Ollama / Llama local",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -104,21 +67,20 @@ app.add_middleware(
 async def raiz():
     return {
         "status": "online",
-        "versao": "2.0.0",
         "provedor": provider.nome if provider else None,
         "ia_disponivel": ia_disponivel,
         "aviso": None if ia_disponivel else (
-            "Provedor de IA não configurado. Verifique AI_PROVIDER e as chaves de API no arquivo .env."
+            "Ollama não está configurado. "
+            "Instale o Ollama (https://ollama.com), execute 'ollama pull llama3.2-vision' "
+            "e reinicie o servidor."
         )
     }
 
 
 @app.get("/status")
 async def status():
-    config = _ler_config()
     return {
         "api": "online",
-        "provedor_configurado": config["provider"],
         "ia": provider.nome if provider else "não configurado",
         "ia_disponivel": ia_disponivel,
         "tipos_suportados": TIPOS_DOCUMENTOS,
@@ -130,20 +92,16 @@ async def status():
 @app.post("/processar", response_model=RespostaProcessamento)
 async def processar_documentos(arquivos: list[UploadFile] = File(...)):
     """
-    Processa múltiplos documentos usando o provedor de IA configurado.
+    Processa múltiplos documentos com Ollama.
     Aceita: PDF, JPG, PNG, WEBP, BMP, TIFF
     """
     if not ia_disponivel or provider is None:
-        config = _ler_config()
-        nome_prov = config["provider"]
-        dicas = {
-            "gemini": "Adicione GEMINI_API_KEY no .env — obtenha em https://aistudio.google.com/app/apikey",
-            "groq":   "Adicione GROQ_API_KEY no .env — obtenha gratuitamente em https://console.groq.com",
-            "ollama": "Instale o Ollama (https://ollama.com) e execute: ollama pull llama3.2-vision",
-        }
         raise HTTPException(status_code=503, detail={
-            "erro": "Provedor de IA não configurado",
-            "mensagem": dicas.get(nome_prov, f"Configure o provedor '{nome_prov}' no arquivo .env.")
+            "erro": "Ollama não disponível",
+            "mensagem": (
+                "Certifique-se de que o Ollama está instalado e em execução, "
+                "e que o modelo de visão está instalado (ollama pull llama3.2-vision)."
+            )
         })
 
     if not arquivos:
@@ -156,7 +114,7 @@ async def processar_documentos(arquivos: list[UploadFile] = File(...)):
 
     for arquivo in arquivos:
         nome = arquivo.filename or "arquivo_sem_nome"
-        logger.info(f"Processando: {nome} via {provider.nome}")
+        logger.info(f"Processando: {nome}")
 
         extensao = Path(nome).suffix.lower()
         if extensao not in EXTENSOES_PERMITIDAS:
@@ -178,7 +136,9 @@ async def processar_documentos(arquivos: list[UploadFile] = File(...)):
             continue
 
         if len(conteudo) == 0:
-            resultados.append(ResultadoArquivo(nome_arquivo=nome, erro="Arquivo vazio", reconhecido=False))
+            resultados.append(ResultadoArquivo(
+                nome_arquivo=nome, erro="Arquivo vazio", reconhecido=False
+            ))
             continue
 
         try:
@@ -201,7 +161,7 @@ async def processar_documentos(arquivos: list[UploadFile] = File(...)):
             logger.error(f"Erro ao processar {nome}: {e}")
             resultados.append(ResultadoArquivo(
                 nome_arquivo=nome,
-                erro=f"Erro interno ao processar o documento: {str(e)}",
+                erro=f"Erro interno: {str(e)}",
                 reconhecido=False
             ))
 

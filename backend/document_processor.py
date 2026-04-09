@@ -1,6 +1,6 @@
 """
-Processador de documentos — agnóstico ao provedor de IA.
-Converte arquivos em imagens e delega a extração para o AIProvider configurado.
+Processador de documentos. Converte arquivos em imagens e delega
+a extração para o OllamaProvider.
 """
 import base64
 import io
@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from ai_provider import AIProvider
+from ai_provider import OllamaProvider
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +182,7 @@ def imagem_para_bytes(imagem: Image.Image) -> bytes:
 def processar_documento(
     arquivo_bytes: bytes,
     nome_arquivo: str,
-    provider: AIProvider
+    provider: OllamaProvider
 ) -> dict:
     """
     Processa um único documento e retorna os dados extraídos.

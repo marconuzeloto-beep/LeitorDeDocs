@@ -6,14 +6,4 @@ pymupdf==1.24.11
 python-dotenv==1.0.1
 pydantic==2.10.6
 aiofiles==24.1.0
-
-# Provedores de IA — instale apenas o que for usar:
-
-# Gemini (Google)
-google-generativeai==0.8.3
-
-# Groq (Llama na nuvem) — API gratuita em https://console.groq.com
-groq==0.13.1
-
-# Ollama (Llama local) — usa cliente OpenAI-compatível
 openai==1.59.9
