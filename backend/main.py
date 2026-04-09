@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from ai_provider import AIProvider, criar_provedor
+from ai_provider import AIProvider, OllamaIndisponivel, criar_provedor
 from document_processor import TIPOS_DOCUMENTOS, processar_documento
 from models import RespostaProcessamento, ResultadoArquivo
 
@@ -32,7 +32,7 @@ ia_disponivel: bool = False
 def _ler_config() -> dict:
     """Lê as configurações de provedor do ambiente."""
     return {
-        "provider":        os.getenv("AI_PROVIDER", "gemini").strip(),
+        "provider":        os.getenv("AI_PROVIDER", "ollama").strip(),
         "gemini_api_key":  os.getenv("GEMINI_API_KEY", "").strip(),
         "groq_api_key":    os.getenv("GROQ_API_KEY", "").strip(),
         "groq_model":      os.getenv("GROQ_MODEL", "").strip(),
@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
     config = _ler_config()
     nome_provedor = config["provider"]
 
-    # Verifica se as credenciais mínimas estão presentes antes de tentar conectar
+    # Verifica se as credenciais mínimas estão presentes (Ollama não precisa de chave)
     chave_ausente = (
         (nome_provedor == "gemini" and not config["gemini_api_key"]) or
         (nome_provedor == "groq"   and not config["groq_api_key"])
@@ -67,6 +67,15 @@ async def lifespan(app: FastAPI):
             provider = criar_provedor(config)
             ia_disponivel = True
             logger.info(f"✅ Provedor de IA configurado: {provider.nome}")
+        except OllamaIndisponivel as e:
+            logger.error(f"❌ {e}")
+            logger.error(
+                "   Verifique se o Ollama está instalado e em execução.\n"
+                "   → Instale em: https://ollama.com\n"
+                "   → Inicie com: ollama serve\n"
+                f"  → Baixe o modelo: ollama pull {config.get('ollama_model') or 'llama3.2-vision'}"
+            )
+            ia_disponivel = False
         except Exception as e:
             logger.error(f"❌ Erro ao configurar provedor de IA '{nome_provedor}': {e}")
             ia_disponivel = False

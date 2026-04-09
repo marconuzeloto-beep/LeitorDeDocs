@@ -15,6 +15,11 @@ from abc import ABC, abstractmethod
 logger = logging.getLogger(__name__)
 
 
+class OllamaIndisponivel(Exception):
+    """Levantada quando o Ollama não está acessível ou o modelo não está instalado."""
+    pass
+
+
 class AIProvider(ABC):
     """Interface base para todos os provedores de IA."""
 
@@ -223,26 +228,93 @@ class OllamaProvider(AIProvider):
         return resposta.choices[0].message.content.strip()
 
 
+def verificar_ollama(base_url: str, modelo: str) -> None:
+    """
+    Verifica se o Ollama está rodando e se o modelo solicitado está instalado.
+    Levanta OllamaIndisponivel com mensagem clara em caso de falha.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    # 1. Verifica se o servidor Ollama está acessível
+    try:
+        with urllib.request.urlopen(f"{base_url.rstrip('/')}/api/tags", timeout=5) as r:
+            data = _json.loads(r.read())
+    except urllib.error.URLError as e:
+        raise OllamaIndisponivel(
+            f"Ollama não está acessível em {base_url}. "
+            "Certifique-se de que o Ollama está instalado e em execução (ollama serve)."
+        ) from e
+    except Exception as e:
+        raise OllamaIndisponivel(f"Erro ao conectar ao Ollama em {base_url}: {e}") from e
+
+    # 2. Verifica se há modelos instalados
+    nomes_instalados = [m["name"] for m in data.get("models", [])]
+    bases_instaladas = [n.split(":")[0] for n in nomes_instalados]
+    logger.info(f"Modelos Ollama instalados: {nomes_instalados}")
+
+    if not nomes_instalados:
+        raise OllamaIndisponivel(
+            "Nenhum modelo instalado no Ollama. "
+            f"Execute: ollama pull {modelo}"
+        )
+
+    # 3. Verifica se o modelo solicitado (ou um compatível) está instalado
+    modelo_base = modelo.split(":")[0]
+    modelo_encontrado = (
+        modelo in nomes_instalados or
+        modelo_base in bases_instaladas or
+        any(n.startswith(modelo_base) for n in nomes_instalados)
+    )
+
+    if not modelo_encontrado:
+        # Verifica se há algum modelo de visão instalado como alternativa
+        alternativas = [
+            n for n in nomes_instalados
+            if any(n.startswith(m.split(":")[0]) for m in MODELOS_OLLAMA_VISAO)
+        ]
+        if alternativas:
+            logger.warning(
+                f"Modelo '{modelo}' não encontrado. "
+                f"Usando alternativa instalada: {alternativas[0]}"
+            )
+        else:
+            raise OllamaIndisponivel(
+                f"Modelo '{modelo}' não está instalado. "
+                f"Execute: ollama pull {modelo}\n"
+                f"Modelos instalados: {', '.join(nomes_instalados)}"
+            )
+
+
 def detectar_modelo_ollama(base_url: str, modelo_preferido: str = "") -> str:
     """Lista modelos Ollama instalados e retorna o melhor com suporte a visão."""
     try:
-        import urllib.request, json as _json
+        import json as _json
+        import urllib.request
+
         url = f"{base_url.rstrip('/')}/api/tags"
         with urllib.request.urlopen(url, timeout=5) as r:
             data = _json.loads(r.read())
 
-        modelos = [m["name"].split(":")[0] for m in data.get("models", [])]
         nomes_completos = [m["name"] for m in data.get("models", [])]
-        logger.info(f"Modelos Ollama instalados: {nomes_completos}")
+        bases = [n.split(":")[0] for n in nomes_completos]
 
-        if modelo_preferido and modelo_preferido in nomes_completos:
-            return modelo_preferido
-
-        for pref in MODELOS_OLLAMA_VISAO:
-            if pref in nomes_completos or pref in modelos:
-                # Retorna o nome completo se disponível
+        if modelo_preferido:
+            # Aceita nome exato ou nome base
+            if modelo_preferido in nomes_completos:
+                return modelo_preferido
+            if modelo_preferido.split(":")[0] in bases:
                 for nc in nomes_completos:
-                    if nc.startswith(pref):
+                    if nc.startswith(modelo_preferido.split(":")[0]):
+                        return nc
+
+        # Seleciona o melhor modelo de visão instalado
+        for pref in MODELOS_OLLAMA_VISAO:
+            pref_base = pref.split(":")[0]
+            if pref in nomes_completos or pref_base in bases:
+                for nc in nomes_completos:
+                    if nc.startswith(pref_base):
                         return nc
                 return pref
 
@@ -288,7 +360,10 @@ def criar_provedor(config: dict) -> AIProvider:
     elif provider == "ollama":
         base_url = config.get("ollama_base_url", "http://localhost:11434")
         modelo_pref = config.get("ollama_model", "")
+        # Detecta o melhor modelo disponível antes de validar
         model = detectar_modelo_ollama(base_url, modelo_pref)
+        # Verifica se o Ollama está rodando e o modelo está instalado
+        verificar_ollama(base_url, model)
         return OllamaProvider(base_url=base_url, model=model)
 
     else:
